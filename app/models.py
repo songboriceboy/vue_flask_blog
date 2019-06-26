@@ -1,9 +1,12 @@
-from flask import url_for
+from _md5 import md5
+
 from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
 import base64
 from datetime import datetime, timedelta
 import os
+import jwt
+from flask import url_for, current_app
 
 class PaginatedAPIMixin(object):
     @staticmethod
@@ -33,8 +36,41 @@ class User(PaginatedAPIMixin, db.Model):
     username = db.Column(db.String(64), index=True, unique=True)
     email = db.Column(db.String(120), index=True, unique=True)
     password_hash = db.Column(db.String(128))  # 不保存原始密码
-    token = db.Column(db.String(32), index=True, unique=True)
-    token_expiration = db.Column(db.DateTime)
+    name = db.Column(db.String(64))
+    location = db.Column(db.String(64))
+    about_me = db.Column(db.Text())
+    member_since = db.Column(db.DateTime(), default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime(), default=datetime.utcnow)
+
+    def avatar(self, size):
+        '''头像'''
+        digest = md5(self.email.lower().encode('utf-8')).hexdigest()
+        return 'https://www.gravatar.com/avatar/{}?d=identicon&s={}'.format(digest, size)
+
+    def get_jwt(self, expires_in=600):
+        now = datetime.utcnow()
+        payload = {
+            'user_id': self.id,
+            'name': self.name if self.name else self.username,
+            'exp': now + timedelta(seconds=expires_in),
+            'iat': now
+        }
+        return jwt.encode(
+            payload,
+            current_app.config['SECRET_KEY'],
+            algorithm='HS256').decode('utf-8')
+
+    @staticmethod
+    def verify_jwt(token):
+        try:
+            payload = jwt.decode(
+                token,
+                current_app.config['SECRET_KEY'],
+                algorithms=['HS256'])
+        except (jwt.exceptions.ExpiredSignatureError, jwt.exceptions.InvalidSignatureError) as e:
+            # Token过期，或被人修改，那么签名验证也会失败
+            return None
+        return User.query.get(payload.get('user_id'))
 
     def get_token(self, expires_in=3600):
         now = datetime.utcnow()
@@ -68,8 +104,14 @@ class User(PaginatedAPIMixin, db.Model):
         data = {
             'id': self.id,
             'username': self.username,
+            'name': self.name,
+            'location': self.location,
+            'about_me': self.about_me,
+            'member_since': self.member_since.isoformat() + 'Z',
+            'last_seen': self.last_seen.isoformat() + 'Z',
             '_links': {
-                'self': url_for('api.get_user', id=self.id)
+                'self': url_for('api.get_user', id=self.id),
+                'avatar': self.avatar(128)
             }
         }
         if include_email:
@@ -77,7 +119,7 @@ class User(PaginatedAPIMixin, db.Model):
         return data
 
     def from_dict(self, data, new_user=False):
-        for field in ['username', 'email']:
+        for field in ['username', 'email', 'name', 'location', 'about_me']:
             if field in data:
                 setattr(self, field, data[field])
         if new_user and 'password' in data:
